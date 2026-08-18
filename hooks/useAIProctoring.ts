@@ -22,6 +22,7 @@ export const useAIProctoring = (videoElement: HTMLVideoElement | null, isActive:
 
   const requestRef = useRef<number | null>(null);
   const violationStartTimeRef = useRef<number | null>(null);
+  const lastProcessedTimeRef = useRef<number>(0);
 
   // Khởi tạo MediaPipe Face Landmarker
   useEffect(() => {
@@ -51,15 +52,19 @@ export const useAIProctoring = (videoElement: HTMLVideoElement | null, isActive:
   const predictLoop = useCallback(() => {
     if (!videoElement || !faceLandmarker || !isActive) return;
 
-    if (videoElement.readyState >= 2) {
-      const nowInMs = Date.now();
-      const result = faceLandmarker.detectForVideo(videoElement, nowInMs);
+    const nowInMs = Date.now();
+    // Giới hạn chạy tối đa 10 lần một giây (mỗi 100ms) để giải phóng tài nguyên trình duyệt
+    if (nowInMs - lastProcessedTimeRef.current >= 100) {
+      lastProcessedTimeRef.current = nowInMs;
 
-      let isFrameViolation = false;
-      let currentReason = "";
-      let requiredDelay = 1500; // Cho phép lệch khung hình tối đa 1.5s trước khi báo động
+      if (videoElement.readyState >= 2) {
+        const result = faceLandmarker.detectForVideo(videoElement, nowInMs);
 
-      totalFramesRef.current += 1;
+        let isFrameViolation = false;
+        let currentReason = "";
+        let requiredDelay = 1500; // Cho phép lệch khung hình tối đa 1.5s trước khi báo động
+
+        totalFramesRef.current += 1;
 
       if (result.faceLandmarks && result.faceLandmarks.length > 0) {
         const landmarks = result.faceLandmarks[0];
@@ -141,6 +146,7 @@ export const useAIProctoring = (videoElement: HTMLVideoElement | null, isActive:
         setFocusScore(score);
       }
     }
+  }
 
     requestRef.current = requestAnimationFrame(predictLoop);
   }, [videoElement, faceLandmarker, isActive]);

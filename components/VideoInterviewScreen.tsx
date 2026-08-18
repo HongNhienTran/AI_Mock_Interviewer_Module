@@ -35,7 +35,7 @@ export default function VideoInterviewScreen({ role, initialQuestions, onComplet
     initialQuestions.map((q) => ({ ...q, isFollowUp: false }))
   );
   const [currentIdx, setCurrentIdx] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [evaluatingCount, setEvaluatingCount] = useState(0);
   const [transcript, setTranscript] = useState("");
   
   // Trạng thái AI Speech
@@ -87,7 +87,17 @@ export default function VideoInterviewScreen({ role, initialQuestions, onComplet
       const runAttireCheck = async () => {
         if (!videoRef.current) return;
         try {
-          const predictions = await mobilenetModel.classify(videoRef.current);
+          // Tạo offscreen canvas kích thước 224x224 để giảm tải tính toán cho MobileNet
+          const canvas = document.createElement("canvas");
+          canvas.width = 224;
+          canvas.height = 224;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+
+          // Vẽ thu nhỏ khung hình camera hiện tại
+          ctx.drawImage(videoRef.current, 0, 0, 224, 224);
+
+          const predictions = await mobilenetModel.classify(canvas);
           const topLabels = predictions.map((p) => p.className.toLowerCase()).join(", ");
           console.log("Dự đoán trang phục:", topLabels);
 
@@ -225,82 +235,68 @@ export default function VideoInterviewScreen({ role, initialQuestions, onComplet
     }
   };
 
-  // Xác nhận câu trả lời và chuyển sang câu tiếp theo
-  const handleSubmitAnswer = async () => {
-    if (loading || isAiSpeaking) return;
+  // Xác nhận câu trả lời và chuyển ngay sang câu tiếp theo
+  const handleSubmitAnswer = () => {
+    if (isAiSpeaking || currentIdx >= questions.length) return;
 
     stopListening();
-    setLoading(true);
 
-    const answer = transcript.trim() || "Ứng viên im lặng / không trả lời.";
-    const currentQuestion = questions[currentIdx];
+    const answer = transcript.trim() || "Ứng viên không trả lời bằng giọng nói.";
+    const qIdx = currentIdx;
+    const currentQuestion = questions[qIdx];
 
-    try {
-      // Gọi API chấm điểm câu trả lời hiện tại bằng Ollama Local
-      const res = await fetch("/api/interview/respond", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          role,
-          questionText: currentQuestion.text,
-          answerText: answer,
-          isFollowUp: currentQuestion.isFollowUp || false,
-        }),
-      });
+    // Reset transcript ngay lập tức cho câu tiếp theo
+    setTranscript("");
 
-      if (!res.ok) throw new Error("Chấm điểm thất bại.");
-      const evaluation = await res.json(); // { score, feedback, suggestedAnswer, followUpQuestion }
-
-      // Cập nhật kết quả vào log câu hỏi
-      const updatedQuestions = [...questions];
-      updatedQuestions[currentIdx] = {
-        ...currentQuestion,
-        answer,
-        score: evaluation.score,
-        feedback: evaluation.feedback,
-        suggestedAnswer: evaluation.suggestedAnswer,
-      };
-      setQuestions(updatedQuestions);
-
-      // Reset transcript cho câu hỏi mới
-      setTranscript("");
-
-      // Kiểm tra câu hỏi phụ (follow-up)
-      if (evaluation.followUpQuestion) {
-        const followUpObj: Question = {
-          id: Date.now(),
-          text: evaluation.followUpQuestion,
-          isFollowUp: true,
-        };
-
-        const newQuestionsList = [
-          ...updatedQuestions.slice(0, currentIdx + 1),
-          followUpObj,
-          ...updatedQuestions.slice(currentIdx + 1),
-        ];
-
-        setQuestions(newQuestionsList);
-        setCurrentIdx(currentIdx + 1);
-
-        // Đọc câu hỏi phụ
-        speakQuestion(`Câu hỏi phụ dành cho bạn: ${evaluation.followUpQuestion}`);
-      } else {
-        const nextIdx = currentIdx + 1;
-        if (nextIdx < updatedQuestions.length) {
-          setCurrentIdx(nextIdx);
-          speakQuestion(`Cảm ơn bạn. Tiếp theo, hãy trả lời câu hỏi: ${updatedQuestions[nextIdx].text}`);
-        } else {
-          // Hoàn thành cuộc phỏng vấn
-          setCurrentIdx(updatedQuestions.length); // Vượt chỉ mục báo hiệu kết thúc
-          speakQuestion("Buổi phỏng vấn đã hoàn tất thành công. Xin cảm ơn bạn.");
-        }
-      }
-    } catch (err) {
-      console.error(err);
-      alert("Lỗi kết nối đánh giá. Vui lòng bấm thử lại.");
-    } finally {
-      setLoading(false);
+    // Chuyển câu hỏi tiếp theo ngay lập tức trên màn hình
+    const nextIdx = qIdx + 1;
+    if (nextIdx < questions.length) {
+      setCurrentIdx(nextIdx);
+      speakQuestion(`Cảm ơn bạn. Tiếp theo, hãy trả lời câu hỏi: ${questions[nextIdx].text}`);
+    } else {
+      // Đã trả lời hết tất cả câu hỏi
+      setCurrentIdx(questions.length);
+      speakQuestion("Buổi phỏng vấn đã hoàn tất thành công. Xin cảm ơn bạn.");
     }
+
+    setEvaluatingCount((c) => c + 1);
+
+    // Gọi API chấm điểm chạy ngầm
+    fetch("/api/interview/respond", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role,
+        questionText: currentQuestion.text,
+        answerText: answer,
+        isFollowUp: currentQuestion.isFollowUp || false,
+      }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("Chấm điểm lỗi.");
+        return res.json();
+      })
+      .then((evaluation) => {
+        setQuestions((prev) => {
+          const copy = [...prev];
+          if (copy[qIdx]) {
+            copy[qIdx] = {
+              ...copy[qIdx],
+              answer,
+              score: evaluation.score,
+              feedback: evaluation.feedback,
+              suggestedAnswer: evaluation.suggestedAnswer,
+            };
+          }
+          return copy;
+        });
+      })
+      .catch((err) => {
+        console.error("Lỗi đánh giá câu hỏi ngầm:", err);
+      })
+      .finally(() => {
+        setEvaluatingCount((c) => Math.max(0, c - 1));
+      });
   };
 
   const handleFinish = () => {
@@ -447,27 +443,23 @@ export default function VideoInterviewScreen({ role, initialQuestions, onComplet
           {!isFinished ? (
             <button
               onClick={handleSubmitAnswer}
-              disabled={loading || isAiSpeaking || !transcript.trim()}
+              disabled={isAiSpeaking || !transcript.trim()}
               className="w-full py-3 bg-[#FFDE4D] hover:bg-[#ffe675] disabled:bg-gray-200 disabled:cursor-not-allowed text-black border-4 border-black font-black rounded-xl neo-shadow neo-btn uppercase text-xs flex items-center justify-center gap-1.5"
             >
-              {loading ? (
-                <>
-                  <Sparkles className="w-4 h-4 animate-spin" />
-                  ĐANG ĐÁNH GIÁ CÂU HỎI...
-                </>
-              ) : (
-                <>
-                  <Check className="w-4 h-4 stroke-[3]" />
-                  XÁC NHẬN TRẢ LỜI
-                </>
-              )}
+              <Check className="w-4 h-4 stroke-[3]" />
+              <span>XÁC NHẬN TRẢ LỜI</span>
             </button>
           ) : (
             <button
               onClick={handleFinish}
-              className="w-full py-3 bg-[#3DBC93] hover:bg-[#4ddbb0] text-black border-4 border-black font-black rounded-xl neo-shadow neo-btn uppercase text-xs flex items-center justify-center gap-1.5"
+              disabled={evaluatingCount > 0}
+              className="w-full py-3 bg-[#3DBC93] hover:bg-[#4ddbb0] disabled:bg-gray-300 disabled:cursor-not-allowed text-black border-4 border-black font-black rounded-xl neo-shadow neo-btn uppercase text-xs flex items-center justify-center gap-1.5 disabled:shadow-none"
             >
-              <span>Xem kết quả phỏng vấn</span>
+              <span>
+                {evaluatingCount > 0 
+                  ? `Đang hoàn tất chấm điểm... (còn ${evaluatingCount} câu)` 
+                  : "Xem kết quả phỏng vấn"}
+              </span>
             </button>
           )}
         </div>

@@ -62,6 +62,10 @@ export async function queryOllama(
     model: model,
     prompt: prompt,
     stream: false,
+    options: {
+      temperature: options.jsonFormat ? 0.1 : 0.6,
+      num_predict: 250, // Giới hạn độ dài từ ngữ trả về để tăng tốc độ xử lý
+    }
   };
 
   if (options.systemPrompt) {
